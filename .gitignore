@@ -1,2 +1,6 @@
 .env
 /creds
+*.pth
+*.pt
+*.parquet
+*.csv
