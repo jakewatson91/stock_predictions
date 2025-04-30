@@ -7,6 +7,9 @@ from transformers import AutoTokenizer, AutoModel
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm 
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -15,8 +18,13 @@ from encode import preprocess_markets
 from models import PriceLSTM
 
 device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-embedding_model = AutoModel.from_pretrained("distilbert-base-uncased").to(device).half()
+# tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+# embedding_model = AutoModel.from_pretrained("distilbert-base-uncased").to(device).half()
+from sentence_transformers import SentenceTransformer
+# pick any pre-trained S-BERT model, e.g. all-MiniLM-L6-v2
+embedding_model = SentenceTransformer("sentence-transformers/all-distilroberta-v1", 
+                                      token=os.getenv("HF_API_KEY"),
+                                      device=device)  
 
 # 2) Sequence dataset: given window of days → predict next-day price
 class DaySequenceDataset(Dataset):
@@ -135,14 +143,15 @@ def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, filename):
 
 if __name__ == "__main__":
 
-    # ticker = "NVDA"
-    ticker = "SPY"
+    ticker = "NVDA"
+    # ticker = "SPY"
     start, end = "2025-01-01", "2025-03-28"
-    filename = "SPY_NEXT_DAY2"
+    filename = "NVDA_DAY_ST_ROBERTA"
     load_model = False
     save = False
-    epochs = 10000
-    lr = 1e-5
+    next_day = False
+    epochs = 2500
+    lr = 1e-4
 
     #--------------- Load and prep data --------------------#
     data = read_parquet()
@@ -163,7 +172,6 @@ if __name__ == "__main__":
         numeric_cols,
         categorical_cols,
         text_cols,
-        tokenizer,
         embedding_model,
         device,
         start,
@@ -172,8 +180,9 @@ if __name__ == "__main__":
     )
     dates = [d.normalize() for d in dates]
     
-    dates = dates[1:] # predict next day price
-    market_tensor = market_tensor[:-1]
+    if next_day:
+        dates = dates[1:] # predict next day price
+        market_tensor = market_tensor[:-1]
 
     # print("Tensor shape:", market_tensor.shape)  # (days, max_markets, D_total)
     # print("Dates:", dates)

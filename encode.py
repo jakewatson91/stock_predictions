@@ -12,51 +12,25 @@ def create_day_tensor(df, day, max_markets, feature_columns):
         arr = np.vstack([arr, padding])
     return torch.from_numpy(arr)            # (max_markets, D)
 
-def embed_texts(texts, tokenizer, model, device, batch_size=32):
-    model.eval()
-    print(f">>> embed_texts running on {device}, CUDA available={torch.cuda.is_available()}")
-
-    enc = tokenizer(
+def embed_texts(texts, model, batch_size=32):
+    """
+    texts: N strings
+    returns: torch.FloatTensor of shape (N, H)
+    """
+    # 'convert_to_tensor=True' gives you a torch.Tensor on the right device
+    embs = model.encode(
         texts,
-        padding=True,
-        truncation=True,
-        max_length=128,
-        return_tensors="pt",
-        return_attention_mask=True
+        batch_size=batch_size,
+        show_progress_bar=True,
+        convert_to_tensor=True,
     )
-    # 2) Move once to GPU
-    enc = {k: v.to(device, non_blocking=True) for k, v in enc.items()}
-
-    batch_embs = []
-    # 3) Chunk your already-tokenized tensors
-    total = enc["input_ids"].size(0) # total = N
-    for i in tqdm(range(0, total, batch_size), desc="Encoding", unit="batch"):
-        batch = {k: v[i : i + batch_size] for k, v in enc.items()} # batch["input_ids"].shape = (Bᵢ, L)
-        with torch.no_grad(), torch.amp.autocast(device_type=device.type, dtype=torch.float16):
-            out = model(**batch) # out.last_hidden_state.shape = (Bᵢ, L, H)
-            cls = out.last_hidden_state[:, 0, :]  # (B, H)
-        batch_embs.append(cls.cpu())
-        # debug print for first batch
-        if i == 0:
-            print(f"batch 0 size: {cls.size()}, dtype: {cls.dtype}")
-
-    embs = torch.cat(batch_embs, dim=0)  # embs.shape = (∑ᵢ Bᵢ, H) = (N, H)
-    
-    print("Saving embeddings...\n")
-    torch.save(embs, "all_text_embeddings.pt")
-    print("Embeddings saved as all_text_embeddings.pt\n")
-    
-    # print(f"ALL EMBS SHAPE: {embs.size()}\n\n")
-    # print(f"CAT SHAPE: {embs.size()}\n\n")
-    # 4) Concatenate and return
-    return embs
+    return embs  # already on `device`, dtype=torch.float32
 
 def preprocess_markets(
     df: pd.DataFrame,
     numeric_cols:    list[str],
     categorical_cols:list[str],
     text_cols:       list[str],
-    tokenizer,
     model,
     device:          torch.device,
     start,
@@ -96,7 +70,7 @@ def preprocess_markets(
     if load_embeddings:
         embeddings = torch.load("all_text_embeddings.pt")
     else: 
-        embeddings = embed_texts(texts, tokenizer, model, device)  # (N, H)
+        embeddings = embed_texts(texts, model)  # (N, H)
     
     arr = embeddings.cpu().numpy()                              # (N, H)
     H = arr.shape[1]
