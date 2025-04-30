@@ -20,7 +20,7 @@ def embed_texts(texts, tokenizer, model, device, batch_size=32):
         texts,
         padding=True,
         truncation=True,
-        max_length=64,
+        max_length=128,
         return_tensors="pt",
         return_attention_mask=True
     )

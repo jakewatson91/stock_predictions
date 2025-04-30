@@ -134,8 +134,8 @@ def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, ticker):
 
 if __name__ == "__main__":
 
-    ticker = "NVDA"
-    # ticker = "SPY"
+    # ticker = "NVDA"
+    ticker = "SPY"
     start, end = "2025-01-01", "2025-04-24"
 
     #--------------- Load and prep data --------------------#
@@ -162,7 +162,7 @@ if __name__ == "__main__":
         device,
         start,
         end,
-        load_embeddings=True
+        load_embeddings=False
     )
     dates = [d.normalize() for d in dates]
 
@@ -185,14 +185,15 @@ if __name__ == "__main__":
     n_days, M, D = market_tensor.shape
     price_model = PriceLSTM(M, D).to(device)
 
-    optimizer = torch.optim.Adam(price_model.parameters(), lr=1e-3)    
+    optimizer = torch.optim.Adam(price_model.parameters(), lr=1e-4)    
     
     loss_fn = nn.MSELoss()
 
-    train(price_model, train_loader, ticker, epochs=100)
+    train(price_model, train_loader, ticker, epochs=5000)
 
-    load = False
-    if load:
+    # Load existing model?
+    load_model = False
+    if load_model:
         torch.load(price_model.state_dict(), f"{ticker}_model.pth")
     mse, rmse, preds, y_true = evaluate(price_model, test_loader)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
