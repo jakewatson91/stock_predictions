@@ -10,9 +10,18 @@ class PriceLSTM(nn.Module):
             nn.ReLU(),
             nn.Linear(Dprime, Dprime),
         )
+
+        # 2) GRU over days
+        self.gru = nn.GRU(
+            input_size=Dprime,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+        )
+
         # 2) LSTM over those day embeddings
         self.lstm = nn.LSTM(
-            input_size=Dprime,
+            input_size=hidden_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -31,7 +40,7 @@ class PriceLSTM(nn.Module):
 
         # collapse to (B*S, M, D) for day-encoder
         flat = x_seq.view(B*S, M, D)                  # (B*S, M, D)
-        h     = self.day_encoder(flat)                # (B*S, Dprime)
+        h = self.day_encoder(flat)                # (B*S, Dprime)
 
         # print(f"  [day_encoder] h: min {h.min().item():.4f}, max {h.max().item():.4f}, mean {h.mean().item():.4f}")
         
@@ -44,8 +53,8 @@ class PriceLSTM(nn.Module):
         cnt   = mask.sum(dim=2).clamp(min=1e-3)        # (B, S, 1)
         day_embs = h_sum / cnt                        # (B, S, Dprime)
 
-        # now run through LSTM
-        _, (hn, _) = self.lstm(day_embs)              # hn[-1] is (B, hidden_size)
+        gru_out, _  = self.gru(day_embs)              # (B, S, gru_hidden)
+        lstm_out, (hn, _) = self.lstm(gru_out)              # hn[-1] is (B, hidden_size)
 
         # map to price
         return self.regressor(hn[-1]).squeeze(-1)      # (B,)

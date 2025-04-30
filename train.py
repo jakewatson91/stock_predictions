@@ -51,12 +51,12 @@ def prep_split(target_df, ticker, market_tensor, dates, start, end):
     y_norm = (y - y_mean) / y_std
 
     # 2) Split into train/test arrays
-    X_train, X_test, y_train, y_test = train_test_split(X, y_norm, test_size=0.2, shuffle=True, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y_norm, test_size=0.2, shuffle=False, random_state=42)
 
     return X_train, X_test, y_train, y_test, y_std, y_mean
 
 # 4) Training loop
-def train(model, loader, ticker, epochs=1):
+def train(model, loader, filename, epochs=1, save=True):
     for epoch in tqdm(range(1, epochs+1), desc="Training"):
         model.train()
         running_loss = 0.0
@@ -90,7 +90,8 @@ def train(model, loader, ticker, epochs=1):
         avg_loss = running_loss / len(loader.dataset)
         if epoch % 20 == 1:
             print(f"Epoch {epoch}/{epochs} — Train MSE: {avg_loss:.4f}")
-    torch.save(model.state_dict(), f"{ticker}_model.pth")
+    if save:
+        torch.save(model.state_dict(), f"{filename}_model.pth")
 
 def evaluate(model, loader, epochs=20):
     model.eval()
@@ -118,7 +119,7 @@ def evaluate(model, loader, epochs=20):
 
         return mse, rmse, preds, targets
 
-def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, ticker):
+def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, filename):
     """
     preds: 1D array of your model predictions
     targets: 1D array of the true values (same length as preds)
@@ -128,15 +129,20 @@ def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, ticker):
     plt.plot(targets, label="True Values")
     plt.xlabel("Sample Index")
     plt.ylabel("Price")
-    plt.title(f"{ticker}_preds_vs_target")
+    plt.title(f"{filename}_preds_vs_target")
     plt.legend()
-    plt.savefig(f"{ticker}_preds_vs_target.png")
+    plt.savefig(f"{filename}_preds_vs_target.png")
 
 if __name__ == "__main__":
 
     # ticker = "NVDA"
     ticker = "SPY"
-    start, end = "2025-01-01", "2025-04-24"
+    start, end = "2025-01-01", "2025-03-28"
+    filename = "SPY_NEXT_DAY2"
+    load_model = False
+    save = False
+    epochs = 10000
+    lr = 1e-5
 
     #--------------- Load and prep data --------------------#
     data = read_parquet()
@@ -165,6 +171,9 @@ if __name__ == "__main__":
         load_embeddings=False
     )
     dates = [d.normalize() for d in dates]
+    
+    dates = dates[1:] # predict next day price
+    market_tensor = market_tensor[:-1]
 
     # print("Tensor shape:", market_tensor.shape)  # (days, max_markets, D_total)
     # print("Dates:", dates)
@@ -185,16 +194,15 @@ if __name__ == "__main__":
     n_days, M, D = market_tensor.shape
     price_model = PriceLSTM(M, D).to(device)
 
-    optimizer = torch.optim.Adam(price_model.parameters(), lr=1e-4)    
+    optimizer = torch.optim.Adam(price_model.parameters(), lr=lr)    
     
     loss_fn = nn.MSELoss()
 
-    train(price_model, train_loader, ticker, epochs=5000)
+    train(price_model, train_loader, filename, epochs=epochs, save=save)
 
     # Load existing model?
-    load_model = False
     if load_model:
-        torch.load(price_model.state_dict(), f"{ticker}_model.pth")
+        torch.load(price_model.state_dict(), f"{filename}_model.pth")
     mse, rmse, preds, y_true = evaluate(price_model, test_loader)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
 
@@ -206,4 +214,4 @@ if __name__ == "__main__":
     print(f"Preds: {preds}")
     print(f"Y True: {y_true}")
 
-    plot_preds_vs_target(preds, y_true, ticker)
+    plot_preds_vs_target(preds, y_true, filename)
