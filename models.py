@@ -19,7 +19,8 @@ class PriceLSTM(nn.Module):
             batch_first=True,
         )
         # 3) Final regressor from hidden state → price
-        self.regressor = nn.Linear(hidden_size, 1)
+        self.mu_head = nn.Linear(hidden_size, 1)
+        self.logvar_head = nn.Linear(hidden_size, 1)
 
     def forward(self, x_seq):
         """
@@ -46,6 +47,8 @@ class PriceLSTM(nn.Module):
         day_embs = h_sum / cnt                        # (B, S, Dprime)
 
         lstm_out, (hn, _) = self.lstm(day_embs)              # hn[-1] is (B, hidden_size)
+        final_h = hn[-1]                # shape (B, hidden_size)
+        mu      = self.mu_head(final_h) # (B, 1)
+        logvar      = self.logvar_head(final_h) # (B, 1)
 
-        # map to price
-        return self.regressor(hn[-1]).squeeze(-1)      # (B,)
+        return mu.squeeze(-1), logvar.squeeze(-1)  # both (B,)

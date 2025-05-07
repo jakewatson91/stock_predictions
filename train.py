@@ -65,7 +65,7 @@ def prep_split(target_df, ticker, market_tensor, dates, start, end):
     return X_train, X_test, y_train, y_test, y_std, y_mean
 
 # 4) Training loop
-def train(model, loader, filename, epochs=1, save=True):
+def train(model, loader, filename, criterion, epochs=1, save=True):
     for epoch in tqdm(range(1, epochs+1), desc="Training"):
         model.train()
         running_loss = 0.0
@@ -81,13 +81,14 @@ def train(model, loader, filename, epochs=1, save=True):
             #       "mean", y_batch.mean().item())
 
             optimizer.zero_grad()
-            preds = model(x_batch)
+            mu, logvar = model(x_batch)
+            var = torch.exp(logvar)
 
             # print("  preds: nan?", torch.isnan(preds).any().item(),
             #       "min", preds.min().item(), "max", preds.max().item(),
             #       "mean", preds.mean().item())
 
-            loss  = loss_fn(preds, y_batch)
+            loss  = criterion(mu, y_batch, var)
             # print("  loss:", loss.item())
 
             loss.backward()
@@ -98,37 +99,41 @@ def train(model, loader, filename, epochs=1, save=True):
 
         avg_loss = running_loss / len(loader.dataset)
         if epoch % 20 == 1:
-            print(f"Epoch {epoch}/{epochs} — Train MSE: {avg_loss:.4f}")
+            print(f"Epoch {epoch}/{epochs} — Train NLL: {avg_loss:.4f}")
     if save:
         torch.save(model.state_dict(), f"{filename}_model.pth")
 
-def evaluate(model, loader, epochs=20):
+def evaluate(model, loader, criterion, epochs=20):
     model.eval()
     
-    all_preds = []
+    all_mus = []
+    all_vars = []
     all_targets = []
     total_loss = 0.0
     with torch.no_grad():
         for x_batch, y_batch in loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
 
-            preds = model(x_batch)
-            preds = preds.squeeze(-1)
-            loss = loss_fn(preds, y_batch)
+            mu, logvar = model(x_batch)
+            var = torch.exp(logvar)
+
+            loss = criterion(mu, y_batch, var)
             total_loss += loss.item() * x_batch.size(0)
 
-            all_preds.append(preds.cpu())
+            all_mus.append(mu.cpu())
+            all_vars.append(var.cpu())
             all_targets.append(y_batch.cpu())
 
         # flatten lists into tensors
-        preds   = torch.cat(all_preds)
+        preds   = torch.cat(all_mus)
+        vars    = torch.cat(all_vars)
         targets = torch.cat(all_targets)
 
         mse  = torch.mean((preds - targets) ** 2)
         rmse = torch.sqrt(mse)
         accuracies  = compute_accuracy(preds, targets)
 
-        return mse, rmse, preds, targets, accuracies
+        return mse, rmse, preds, targets, accuracies, vars
 
 def compute_accuracy(preds, targets):
     tolerance_rates = [0.25, 0.10, 0.05]
@@ -140,19 +145,33 @@ def compute_accuracy(preds, targets):
     print("Accuracies: ", accuracies)
     return accuracies
 
-def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, filename):
+def plot_preds_vs_target(mus: np.ndarray, targets: np.ndarray, vars: np.ndarray, filename):
     """
     preds: 1D array of your model predictions
     targets: 1D array of the true values (same length as preds)
     """
-    plt.figure()
-    plt.plot(preds, label="Predictions")
-    plt.plot(targets, label="True Values")
-    plt.xlabel("Sample Index")
+    stds = np.sqrt(vars).detach().cpu().numpy()
+    x = np.arange(len(mus))
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, mus, label="Predicted μ", color="C0")
+
+    lower = mus - stds
+    upper = mus + stds
+
+    plt.fill_between(x, lower, upper,
+                     color="C0", alpha=0.2,
+                     label="±1sigma uncertainty")
+    # plot true target
+    plt.plot(x, targets, label="True value", color="C1", linestyle="--")
+
+    plt.xlabel("Sample index")
     plt.ylabel("Price")
-    plt.title(f"{filename}_preds_vs_target")
+    plt.title(f"{filename}: predictions ± uncertainty vs. true")
     plt.legend()
-    plt.savefig(f"{filename}_preds_vs_target.png")
+    plt.tight_layout()
+    plt.savefig(f"{filename}_with_uncertainty.png")
+    plt.close()
 
 if __name__ == "__main__":
 
@@ -218,14 +237,14 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.Adam(price_model.parameters(), lr=lr)    
     
-    loss_fn = nn.MSELoss()
+    criterion = nn.GaussianNLLLoss(full=True)  
 
-    train(price_model, train_loader, filename, epochs=epochs, save=save)
+    train(price_model, train_loader, filename, criterion, epochs=epochs, save=save)
 
     # Load existing model?
     if load_model:
         torch.load(price_model.state_dict(), f"{filename}_model.pth")
-    mse, rmse, preds, y_true, accuracies = evaluate(price_model, test_loader)
+    mse, rmse, preds, y_true, accuracies, vars = evaluate(price_model, test_loader, criterion)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
 
     preds  = preds * y_std + y_mean # scale back up
@@ -236,4 +255,4 @@ if __name__ == "__main__":
     print(f"Preds: {preds}")
     print(f"Y True: {y_true}")
 
-    plot_preds_vs_target(preds, y_true, filename)
+    plot_preds_vs_target(preds, y_true, vars, filename)
