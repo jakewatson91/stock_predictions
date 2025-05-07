@@ -6,6 +6,7 @@ import numpy as np
 from transformers import AutoTokenizer, AutoModel
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 from tqdm import tqdm 
 import os
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ load_dotenv()
 import warnings
 warnings.filterwarnings("ignore")
 
-from spark_utils import read_parquet, prep_spark, top_k_markets_per_day
+from data_processing.spark_utils import read_parquet, prep_spark, top_k_markets_per_day
 from encode import preprocess_markets
 from models import PriceLSTM
 
@@ -112,20 +113,32 @@ def evaluate(model, loader, epochs=20):
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
 
             preds = model(x_batch)
+            preds = preds.squeeze(-1)
             loss = loss_fn(preds, y_batch)
             total_loss += loss.item() * x_batch.size(0)
 
             all_preds.append(preds.cpu())
             all_targets.append(y_batch.cpu())
 
-        mse = total_loss / len(loader.dataset)
-        rmse = torch.sqrt(torch.tensor(mse))
-
         # flatten lists into tensors
-        preds   = torch.cat(all_preds, dim=0)
-        targets = torch.cat(all_targets, dim=0)
+        preds   = torch.cat(all_preds)
+        targets = torch.cat(all_targets)
 
-        return mse, rmse, preds, targets
+        mse  = torch.mean((preds - targets) ** 2)
+        rmse = torch.sqrt(mse)
+        accuracies  = compute_accuracy(preds, targets)
+
+        return mse, rmse, preds, targets, accuracies
+
+def compute_accuracy(preds, targets):
+    tolerance_rates = [0.25, 0.10, 0.05]
+    mask    = targets != 0
+    rel_err = torch.abs(preds[mask] - targets[mask]) / torch.abs(targets[mask])
+
+    accuracies = {f"within_{int(t*100)}%": torch.mean((rel_err <= t).float()).item()
+        for t in tolerance_rates}
+    print("Accuracies: ", accuracies)
+    return accuracies
 
 def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, filename):
     """
@@ -145,13 +158,13 @@ if __name__ == "__main__":
 
     ticker = "NVDA"
     # ticker = "SPY"
-    start, end = "2025-01-01", "2025-03-28"
-    filename = "NVDA_DAY_ST_ROBERTA"
+    start, end = "2023-07-01", "2024-01-01"
+    filename = "NVDA_ND_NEWS_FINAL"
     load_model = False
     save = False
-    next_day = False
-    epochs = 2500
-    lr = 1e-4
+    next_day = True
+    epochs = 5000
+    lr = 1e-5
 
     #--------------- Load and prep data --------------------#
     data = read_parquet()
@@ -212,7 +225,7 @@ if __name__ == "__main__":
     # Load existing model?
     if load_model:
         torch.load(price_model.state_dict(), f"{filename}_model.pth")
-    mse, rmse, preds, y_true = evaluate(price_model, test_loader)
+    mse, rmse, preds, y_true, accuracies = evaluate(price_model, test_loader)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
 
     preds  = preds * y_std + y_mean # scale back up

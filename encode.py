@@ -47,6 +47,12 @@ def preprocess_markets(
     mask = df["created_date"].between(start, end)
     df = df.loc[mask]
 
+    # news preds
+    news_df = pd.read_csv("news_sentiment_preds.csv")
+    news_df["date"] = pd.to_datetime(news_df["date"]).dt.date
+
+    df = df.merge(news_df, left_on="created_date", right_index=True, how="left").fillna({"average_prediction": 0})
+
     # 1) one-hot encode categoricals
     df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
     dummy_cols = [c for c in df.columns
@@ -110,7 +116,7 @@ def preprocess_markets(
 
 if __name__=="__main__":
     from transformers import AutoTokenizer, AutoModel
-    from spark_utils import read_parquet, prep_spark
+    from data_processing.spark_utils import read_parquet, prep_spark
 
     data = read_parquet()
 
