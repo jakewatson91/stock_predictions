@@ -55,10 +55,10 @@ def preprocess_markets(
     # print(df["created_date"].dtype)
 
     # news preds
-    news_df = pd.read_csv("news_sentiment_preds.csv", parse_dates=["date"], index_col="date")
-    news_df.index = news_df.index.normalize()
+    # news_df = pd.read_csv("news_sentiment_preds.csv", parse_dates=["date"], index_col="date")
+    # news_df.index = news_df.index.normalize()
 
-    df = df.join(news_df, how="left").fillna({"average_prediction": 0})
+    # df = df.join(news_df, how="left").fillna({"average_prediction": 0})
 
     # stock prices last 30 days
     prices_df = pd.read_csv("stock_prices_2010-2025.csv", parse_dates=["date"]).set_index("date")
@@ -66,12 +66,12 @@ def preprocess_markets(
 
     # Fit + transform with StandardScaler
     scaler = StandardScaler()
-    nvda_prices = prices_df[['NVDA']] # 2d
-    print(nvda_prices)
-    prices_df['NVDA_norm'] = scaler.fit_transform(nvda_prices)
+    spy_prices = prices_df[['SPY']] # 2d
+    print(spy_prices)
+    prices_df['SPY_norm'] = scaler.fit_transform(spy_prices)
 
     lags_df = pd.concat(
-        [prices_df["NVDA_norm"].shift(i).rename(f"lag_{i}") for i in range(30)],
+        [prices_df["SPY_norm"].shift(i).rename(f"lag_{i}") for i in range(10)],
         axis=1
     ).reindex(df.index).ffill()
 
@@ -135,12 +135,7 @@ def preprocess_markets(
         
     # final feature list
     feature_cols = numeric_cols + dummy_cols + text_emb_cols
-    # # sorted list of days
-    # dates = sorted(df["created_date"].unique())
-
-    # # how many markets at most on any single day
-    # max_markets = int(df["created_date"].value_counts().max())
-
+    
     df = df.reset_index(drop=True)
     # get the sorted array of actual dates
     dates = pd.to_datetime(df["created_date"]).dt.normalize().sort_values().unique()
@@ -158,8 +153,8 @@ def preprocess_markets(
         # tack it _onto every row_ in day_df
         # using numpy for speed:
         X_day = day_df[feature_cols].to_numpy(dtype=np.float32)   # (n_today, D_market)
-        lag_mat = np.broadcast_to(lag_vec, (X_day.shape[0], 30))
-        day_df[ [f"lag_{i}" for i in range(30)] ] = lag_mat
+        lag_mat = np.broadcast_to(lag_vec, (X_day.shape[0], 10))
+        day_df[ [f"lag_{i}" for i in range(10)] ] = lag_mat
 
         # now day_df has exactly the columns your create_day_tensor expects
         # (feature_cols + lag_0..lag_29).  So just call it!
@@ -169,7 +164,7 @@ def preprocess_markets(
                 day_df.reset_index(),
                 day,
                 max_markets,
-                feature_columns=feature_cols + [f"lag_{i}" for i in range(30)]
+                feature_columns=feature_cols + [f"lag_{i}" for i in range(10)]
             )
         )
     # build one (max_markets × n_features) tensor per day

@@ -65,7 +65,7 @@ def prep_split(target_df, ticker, market_tensor, dates, start, end):
     return X_train, X_test, y_train, y_test, y_std, y_mean
 
 # 4) Training loop
-def train(model, loader, filename, criterion, epochs=1, save=True):
+def train(model, loader, filename, criterion, scheduler, epochs=1, save=True):
     for epoch in tqdm(range(1, epochs+1), desc="Training"):
         model.train()
         running_loss = 0.0
@@ -93,6 +93,9 @@ def train(model, loader, filename, criterion, epochs=1, save=True):
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            if scheduler is not None:
+                scheduler.step()
             optimizer.step()
 
             running_loss += loss.item() * x_batch.size(0)
@@ -175,14 +178,14 @@ def plot_preds_vs_target(mus: np.ndarray, targets: np.ndarray, vars: np.ndarray,
 
 if __name__ == "__main__":
 
-    ticker = "NVDA"
+    ticker = "SPY"
     # ticker = "SPY"
-    start, end = "2023-07-01", "2024-01-01"
-    filename = "NVDA_ND_NEWS_FINAL"
+    start, end = "2023-07-01", "2025-04-24"
+    filename = "SPY_LONG_TRAIN"
     load_model = False
-    save = False
+    save = True
     next_day = True
-    epochs = 5000
+    epochs = 100000
     lr = 1e-5
 
     #--------------- Load and prep data --------------------#
@@ -235,18 +238,38 @@ if __name__ == "__main__":
     n_days, M, D = market_tensor.shape
     price_model = PriceLSTM(M, D).to(device)
 
-    optimizer = torch.optim.Adam(price_model.parameters(), lr=lr)    
-    
+    optimizer = torch.optim.Adam(price_model.parameters(), lr=lr) 
+    warmup_epochs = 1000
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_epochs
+            ),
+            torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=20,
+                gamma=0.5
+            ),
+        ],
+        milestones=[warmup_epochs]
+    )   
+        
     criterion = nn.GaussianNLLLoss(full=True)  
 
-    train(price_model, train_loader, filename, criterion, epochs=epochs, save=save)
+    train(price_model, train_loader, filename, criterion, scheduler, epochs=epochs, save=save)
 
     # Load existing model?
     if load_model:
         torch.load(price_model.state_dict(), f"{filename}_model.pth")
     mse, rmse, preds, y_true, accuracies, vars = evaluate(price_model, test_loader, criterion)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
+    print(f"Test Dollars  — MSE: {(mse * y_std):.4f}, RMSE: {(rmse * y_std):.4f}")
 
+    print(f"y std: {y_std}")
     preds  = preds * y_std + y_mean # scale back up
     y_true = y_true * y_std + y_mean
 
