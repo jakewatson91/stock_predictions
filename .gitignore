@@ -5,3 +5,5 @@
 *.parquet
 *.csv
 *.jar
+*.png
+*.out

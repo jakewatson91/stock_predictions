@@ -6,17 +6,26 @@ import numpy as np
 from transformers import AutoTokenizer, AutoModel
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 from tqdm import tqdm 
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import warnings
 warnings.filterwarnings("ignore")
 
-from spark_utils import read_parquet, prep_spark, top_k_markets_per_day
+from data_processing.spark_utils import read_parquet, prep_spark, top_k_markets_per_day
 from encode import preprocess_markets
 from models import PriceLSTM
 
 device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-embedding_model = AutoModel.from_pretrained("distilbert-base-uncased").to(device).half()
+# tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+# embedding_model = AutoModel.from_pretrained("distilbert-base-uncased").to(device).half()
+from sentence_transformers import SentenceTransformer
+# pick any pre-trained S-BERT model, e.g. all-MiniLM-L6-v2
+embedding_model = SentenceTransformer("sentence-transformers/all-distilroberta-v1", 
+                                      token=os.getenv("HF_API_KEY"),
+                                      device=device)  
 
 # 2) Sequence dataset: given window of days → predict next-day price
 class DaySequenceDataset(Dataset):
@@ -56,7 +65,7 @@ def prep_split(target_df, ticker, market_tensor, dates, start, end):
     return X_train, X_test, y_train, y_test, y_std, y_mean
 
 # 4) Training loop
-def train(model, loader, filename, epochs=1, save=True):
+def train(model, loader, filename, criterion, scheduler, epochs=1, save=True):
     for epoch in tqdm(range(1, epochs+1), desc="Training"):
         model.train()
         running_loss = 0.0
@@ -72,76 +81,111 @@ def train(model, loader, filename, epochs=1, save=True):
             #       "mean", y_batch.mean().item())
 
             optimizer.zero_grad()
-            preds = model(x_batch)
+            mu, logvar = model(x_batch)
+            var = torch.exp(logvar)
 
             # print("  preds: nan?", torch.isnan(preds).any().item(),
             #       "min", preds.min().item(), "max", preds.max().item(),
             #       "mean", preds.mean().item())
 
-            loss  = loss_fn(preds, y_batch)
+            loss  = criterion(mu, y_batch, var)
             # print("  loss:", loss.item())
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            if scheduler is not None:
+                scheduler.step()
             optimizer.step()
 
             running_loss += loss.item() * x_batch.size(0)
 
         avg_loss = running_loss / len(loader.dataset)
         if epoch % 20 == 1:
-            print(f"Epoch {epoch}/{epochs} — Train MSE: {avg_loss:.4f}")
+            print(f"Epoch {epoch}/{epochs} — Train NLL: {avg_loss:.4f}")
     if save:
         torch.save(model.state_dict(), f"{filename}_model.pth")
 
-def evaluate(model, loader, epochs=20):
+def evaluate(model, loader, criterion, epochs=20):
     model.eval()
     
-    all_preds = []
+    all_mus = []
+    all_vars = []
     all_targets = []
     total_loss = 0.0
     with torch.no_grad():
         for x_batch, y_batch in loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
 
-            preds = model(x_batch)
-            loss = loss_fn(preds, y_batch)
+            mu, logvar = model(x_batch)
+            var = torch.exp(logvar)
+
+            loss = criterion(mu, y_batch, var)
             total_loss += loss.item() * x_batch.size(0)
 
-            all_preds.append(preds.cpu())
+            all_mus.append(mu.cpu())
+            all_vars.append(var.cpu())
             all_targets.append(y_batch.cpu())
 
-        mse = total_loss / len(loader.dataset)
-        rmse = torch.sqrt(torch.tensor(mse))
-
         # flatten lists into tensors
-        preds   = torch.cat(all_preds, dim=0)
-        targets = torch.cat(all_targets, dim=0)
+        preds   = torch.cat(all_mus)
+        vars    = torch.cat(all_vars)
+        targets = torch.cat(all_targets)
 
-        return mse, rmse, preds, targets
+        mse  = torch.mean((preds - targets) ** 2)
+        rmse = torch.sqrt(mse)
+        accuracies  = compute_accuracy(preds, targets)
 
-def plot_preds_vs_target(preds: np.ndarray, targets: np.ndarray, filename):
+        return mse, rmse, preds, targets, accuracies, vars
+
+def compute_accuracy(preds, targets):
+    tolerance_rates = [0.25, 0.10, 0.05]
+    mask    = targets != 0
+    rel_err = torch.abs(preds[mask] - targets[mask]) / torch.abs(targets[mask])
+
+    accuracies = {f"within_{int(t*100)}%": torch.mean((rel_err <= t).float()).item()
+        for t in tolerance_rates}
+    print("Accuracies: ", accuracies)
+    return accuracies
+
+def plot_preds_vs_target(mus: np.ndarray, targets: np.ndarray, vars: np.ndarray, filename):
     """
     preds: 1D array of your model predictions
     targets: 1D array of the true values (same length as preds)
     """
-    plt.figure()
-    plt.plot(preds, label="Predictions")
-    plt.plot(targets, label="True Values")
-    plt.xlabel("Sample Index")
+    stds = np.sqrt(vars).detach().cpu().numpy()
+    x = np.arange(len(mus))
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, mus, label="Predicted μ", color="C0")
+
+    lower = mus - stds
+    upper = mus + stds
+
+    plt.fill_between(x, lower, upper,
+                     color="C0", alpha=0.2,
+                     label="±1sigma uncertainty")
+    # plot true target
+    plt.plot(x, targets, label="True value", color="C1", linestyle="--")
+
+    plt.xlabel("Sample index")
     plt.ylabel("Price")
-    plt.title(f"{filename}_preds_vs_target")
+    plt.title(f"{filename}: predictions ± uncertainty vs. true")
     plt.legend()
-    plt.savefig(f"{filename}_preds_vs_target.png")
+    plt.tight_layout()
+    plt.savefig(f"{filename}_with_uncertainty.png")
+    plt.close()
 
 if __name__ == "__main__":
 
-    # ticker = "NVDA"
     ticker = "SPY"
-    start, end = "2025-01-01", "2025-03-28"
-    filename = "SPY_NEXT_DAY2"
+    # ticker = "SPY"
+    start, end = "2023-07-01", "2025-04-24"
+    filename = "SPY_LONG_TRAIN"
     load_model = False
-    save = False
-    epochs = 10000
+    save = True
+    next_day = True
+    epochs = 100000
     lr = 1e-5
 
     #--------------- Load and prep data --------------------#
@@ -163,7 +207,6 @@ if __name__ == "__main__":
         numeric_cols,
         categorical_cols,
         text_cols,
-        tokenizer,
         embedding_model,
         device,
         start,
@@ -172,8 +215,9 @@ if __name__ == "__main__":
     )
     dates = [d.normalize() for d in dates]
     
-    dates = dates[1:] # predict next day price
-    market_tensor = market_tensor[:-1]
+    if next_day:
+        dates = dates[1:] # predict next day price
+        market_tensor = market_tensor[:-1]
 
     # print("Tensor shape:", market_tensor.shape)  # (days, max_markets, D_total)
     # print("Dates:", dates)
@@ -194,18 +238,38 @@ if __name__ == "__main__":
     n_days, M, D = market_tensor.shape
     price_model = PriceLSTM(M, D).to(device)
 
-    optimizer = torch.optim.Adam(price_model.parameters(), lr=lr)    
-    
-    loss_fn = nn.MSELoss()
+    optimizer = torch.optim.Adam(price_model.parameters(), lr=lr) 
+    warmup_epochs = 1000
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_epochs
+            ),
+            torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=20,
+                gamma=0.5
+            ),
+        ],
+        milestones=[warmup_epochs]
+    )   
+        
+    criterion = nn.GaussianNLLLoss(full=True)  
 
-    train(price_model, train_loader, filename, epochs=epochs, save=save)
+    train(price_model, train_loader, filename, criterion, scheduler, epochs=epochs, save=save)
 
     # Load existing model?
     if load_model:
         torch.load(price_model.state_dict(), f"{filename}_model.pth")
-    mse, rmse, preds, y_true = evaluate(price_model, test_loader)
+    mse, rmse, preds, y_true, accuracies, vars = evaluate(price_model, test_loader, criterion)
     print(f"Test  — MSE: {mse:.4f}, RMSE: {rmse:.4f}")
+    print(f"Test Dollars  — MSE: {(mse * y_std):.4f}, RMSE: {(rmse * y_std):.4f}")
 
+    print(f"y std: {y_std}")
     preds  = preds * y_std + y_mean # scale back up
     y_true = y_true * y_std + y_mean
 
@@ -214,4 +278,4 @@ if __name__ == "__main__":
     print(f"Preds: {preds}")
     print(f"Y True: {y_true}")
 
-    plot_preds_vs_target(preds, y_true, filename)
+    plot_preds_vs_target(preds, y_true, vars, filename)

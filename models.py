@@ -11,23 +11,16 @@ class PriceLSTM(nn.Module):
             nn.Linear(Dprime, Dprime),
         )
 
-        # 2) GRU over days
-        self.gru = nn.GRU(
+        # 2) LSTM over those day embeddings
+        self.lstm = nn.LSTM(
             input_size=Dprime,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
         )
-
-        # 2) LSTM over those day embeddings
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-        )
         # 3) Final regressor from hidden state → price
-        self.regressor = nn.Linear(hidden_size, 1)
+        self.mu_head = nn.Linear(hidden_size, 1)
+        self.logvar_head = nn.Linear(hidden_size, 1)
 
     def forward(self, x_seq):
         """
@@ -53,8 +46,9 @@ class PriceLSTM(nn.Module):
         cnt   = mask.sum(dim=2).clamp(min=1e-3)        # (B, S, 1)
         day_embs = h_sum / cnt                        # (B, S, Dprime)
 
-        gru_out, _  = self.gru(day_embs)              # (B, S, gru_hidden)
-        lstm_out, (hn, _) = self.lstm(gru_out)              # hn[-1] is (B, hidden_size)
+        lstm_out, (hn, _) = self.lstm(day_embs)              # hn[-1] is (B, hidden_size)
+        final_h = hn[-1]                # shape (B, hidden_size)
+        mu      = self.mu_head(final_h) # (B, 1)
+        logvar      = self.logvar_head(final_h) # (B, 1)
 
-        # map to price
-        return self.regressor(hn[-1]).squeeze(-1)      # (B,)
+        return mu.squeeze(-1), logvar.squeeze(-1)  # both (B,)
