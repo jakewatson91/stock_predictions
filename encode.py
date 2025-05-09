@@ -7,13 +7,14 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-def create_day_tensor(df, day, max_markets, feature_columns):
-    day_df = df[df["created_date"] == day]
+def create_day_tensor(day_df, max_markets, feature_columns):
+    # day_df = df[df["created_date"] == day]
     arr = day_df[feature_columns].values.astype(np.float32)                 # (n_markets_today, D)
     n_today = arr.shape[0]
     if n_today < max_markets:
         padding = np.zeros((max_markets - n_today, arr.shape[1]), dtype=np.float32)
         arr = np.vstack([arr, padding])
+    # print(arr.shape)
     return torch.from_numpy(arr)            # (max_markets, D)
 
 def embed_texts(texts, model, batch_size=32):
@@ -70,15 +71,11 @@ def preprocess_markets(
     print(spy_prices)
     prices_df['SPY_norm'] = scaler.fit_transform(spy_prices)
 
-    lags_df = pd.concat(
-        [prices_df["SPY_norm"].shift(i).rename(f"lag_{i}") for i in range(10)],
-        axis=1
-    ).reindex(df.index).ffill()
+    df['stock_price_today'] = prices_df[['SPY_norm']].reindex(df.index).ffill().bfill()
 
     print(df.columns)
     print(df.head(3))
     
-
     # 1) one-hot encode categoricals
     df = pd.get_dummies(df, columns=categorical_cols, drop_first=False)
     dummy_cols = [c for c in df.columns
@@ -89,17 +86,31 @@ def preprocess_markets(
     means = df[numeric_cols].mean()
     stds  = df[numeric_cols].std().replace(0,1)
     df[numeric_cols] = (df[numeric_cols] - means) / stds
+    print(f"Numeric cols: {df[numeric_cols]}\n")
 
     # 3) embed text columns → new columns col+"_emb0"...col+"_emb{H-1}"
     # collapse all text cols into one and embed once
-    df["all_text"] = (
-        df[text_cols]                          # your list: ["market_title", …]
-          .fillna("")                          # drop NaNs
-          .astype(str)
-          .agg(" [SEP] ".join, axis=1)        # join each row’s texts
+    # df["all_text"] = (
+    #     df[text_cols]                          # your list: ["market_title", …]
+    #       .fillna("")                          # drop NaNs
+    #       .astype(str)
+    #       .agg(" [SEP] ".join, axis=1)        # join each row’s texts
+    # )
+    df['all_text'] = (
+        "The market is: "       + df['market_title'].fillna('')   + ", "
+        "the market description is: " + df['market_desc'].fillna('blank') + ", "
+        "the event name is: "   + df['event_title'].fillna('')   + ", "
+        "the daily yes volume is: "  + df['daily_yes_volume'].fillna(0).astype(str)  + ", "
+        "the daily no volume is: "   + df['daily_no_volume'].fillna(0).astype(str)   + ", "
+        "the 7 day yes momentum is: " + df['7_day_yes_momentum'].fillna(0).astype(str) + ", "
+        "the 7 day no momentum is: "  + df['7_day_no_momentum'].fillna(0).astype(str)
     )
 
+    for i in range(3):
+        print(f"All text: {df['all_text'][i]}\n") # debug
+
     df.index.name = "created_date"
+    
     daily_text = (
     df.groupby(level="created_date")["all_text"]
       .agg(" [SEP] ".join)      # join all market texts on that day
@@ -111,6 +122,7 @@ def preprocess_markets(
         model,
         batch_size=32
     )  # shape (n_days, H)
+    print(f"Daily embs shape: {daily_embs.shape}")
 
     # c) turn into a DataFrame indexed by date
     H = daily_embs.shape[1]
@@ -119,6 +131,7 @@ def preprocess_markets(
         index=daily_text.index,
         columns=[f"all_text_emb{i}" for i in range(H)]
     )
+    print(f"Embeds shape: {emb_df.shape}\n")
 
     # d) join back onto every market-row
     df = (
@@ -129,12 +142,14 @@ def preprocess_markets(
 
     # now drop the raw text columns
     df.drop(columns=text_cols + ["all_text"], inplace=True)
+    print(f"df columns: {df.columns}")
 
     # ——— record the new embedding column names ———
+    # one col per embedding dim from CLS token
     text_emb_cols = [f"all_text_emb{i}" for i in range(H)]
         
     # final feature list
-    feature_cols = numeric_cols + dummy_cols + text_emb_cols
+    feature_cols = numeric_cols + dummy_cols + text_emb_cols + ['stock_price_today']
     
     df = df.reset_index(drop=True)
     # get the sorted array of actual dates
@@ -144,38 +159,20 @@ def preprocess_markets(
     # 2) For each day: slice your original df, grab the lag row, and call create_day_tensor
     day_tensors = []
     for day in dates:
-        # slice out only that day's markets
-        day_df = df[df["created_date"] == day]   # shape (n_today, D_market)
-
-        # grab the 30-day lag vector (shape (30,))
-        lag_vec = lags_df.loc[day].values.astype(np.float32)
-
-        # tack it _onto every row_ in day_df
-        # using numpy for speed:
-        X_day = day_df[feature_cols].to_numpy(dtype=np.float32)   # (n_today, D_market)
-        lag_mat = np.broadcast_to(lag_vec, (X_day.shape[0], 10))
-        day_df[ [f"lag_{i}" for i in range(10)] ] = lag_mat
-
-        # now day_df has exactly the columns your create_day_tensor expects
-        # (feature_cols + lag_0..lag_29).  So just call it!
+        day_df = df[df['created_date'] == day]
         day_tensors.append(
             create_day_tensor(
                 # need to reset index so that create_day_tensor’s df["created_date"] matches:
-                day_df.reset_index(),
-                day,
+                day_df,
                 max_markets,
-                feature_columns=feature_cols + [f"lag_{i}" for i in range(10)]
+                feature_columns=feature_cols
             )
         )
-    # build one (max_markets × n_features) tensor per day
-    day_tensors = [
-        create_day_tensor(df, day, max_markets, feature_cols)
-        for day in dates
-    ]
 
     # stack into a single (n_days, max_markets, n_features) tensor
     tensor = torch.stack(day_tensors, dim=0)
-    # print("tensor.shape:", tensor.shape)  # (n_days, max_markets, n_features)
+    print(tensor[0][0])
+    print("tensor.shape:", tensor.shape)  # (n_days, max_markets, n_features)
 
     return tensor, dates
 
@@ -193,7 +190,7 @@ if __name__=="__main__":
 
     df = prep_spark(data, numeric_cols).toPandas()
 
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     from sentence_transformers import SentenceTransformer
     embedding_model = SentenceTransformer("sentence-transformers/all-distilroberta-v1", 
                                       token=os.getenv("HF_API_KEY"),
@@ -206,8 +203,8 @@ if __name__=="__main__":
         text_cols,
         embedding_model,
         device,
-        "2023-07-01",
-        "2024-01-01",
+        "2024-11-01",
+        "2024-11-02",
         load_embeddings=False
     )
 
